@@ -37,8 +37,8 @@ use vm_memory::{
 use self::defs::{
     VIRTQ_AVAIL_ELEMENT_SIZE, VIRTQ_AVAIL_RING_HEADER_SIZE, VIRTQ_AVAIL_RING_META_SIZE,
     VIRTQ_DESCRIPTOR_SIZE, VIRTQ_DESC_F_INDIRECT, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
-    VIRTQ_USED_ELEMENT_SIZE, VIRTQ_USED_F_NO_NOTIFY, VIRTQ_USED_RING_HEADER_SIZE,
-    VIRTQ_USED_RING_META_SIZE,
+    VIRTQ_MSI_NO_VECTOR, VIRTQ_USED_ELEMENT_SIZE, VIRTQ_USED_F_NO_NOTIFY,
+    VIRTQ_USED_RING_HEADER_SIZE, VIRTQ_USED_RING_META_SIZE,
 };
 
 /// Virtio Queue related errors.
@@ -558,6 +558,9 @@ pub struct QueueState<M: GuestAddressSpace> {
     pub used_ring: GuestAddress,
 
     phantom: PhantomData<M>,
+
+    /// Interrupt vector
+    pub vector: u16,
 }
 
 impl<M: GuestAddressSpace> QueueState<M> {
@@ -650,6 +653,7 @@ impl<M: GuestAddressSpace> QueueStateT<M> for QueueState<M> {
             event_idx_enabled: false,
             signalled_used: None,
             phantom: PhantomData,
+            vector: VIRTQ_MSI_NO_VECTOR,
         }
     }
 
@@ -722,6 +726,7 @@ impl<M: GuestAddressSpace> QueueStateT<M> for QueueState<M> {
         self.next_used = Wrapping(0);
         self.signalled_used = None;
         self.event_idx_enabled = false;
+        self.vector = VIRTQ_MSI_NO_VECTOR;
     }
 
     fn lock(&mut self) -> QueueStateGuard<'_, M> {
