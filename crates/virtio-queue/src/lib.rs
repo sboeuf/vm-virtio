@@ -528,6 +528,9 @@ pub trait QueueStateT<M: GuestAddressSpace> {
     /// Read the `idx` field from the available ring.
     fn avail_idx(&self, mem: &M::T, order: Ordering) -> Result<Wrapping<u16>, Error>;
 
+    /// Read the `idx` field from the used ring.
+    fn used_idx(&self, mem: &M::T, order: Ordering) -> Result<Wrapping<u16>, Error>;
+
     /// Put a used descriptor head into the used ring.
     fn add_used(&mut self, mem: &M::T, head_index: u16, len: u32) -> Result<(), Error>;
 
@@ -552,8 +555,14 @@ pub trait QueueStateT<M: GuestAddressSpace> {
     /// Return the index for the next descriptor in the available ring.
     fn next_avail(&self) -> u16;
 
+    /// Return the index for the next descriptor in the used ring.
+    fn next_used(&self) -> u16;
+
     /// Set the index for the next descriptor in the available ring.
     fn set_next_avail(&mut self, next_avail: u16);
+
+    /// Set the index for the next descriptor in the used ring.
+    fn set_next_used(&mut self, next_used: u16);
 }
 
 /// Struct to maintain information and manipulate state of a virtio queue.
@@ -672,6 +681,28 @@ impl<M: GuestAddressSpace> QueueState<M> {
         mem.load(used_event_addr, order)
             .map(Wrapping)
             .map_err(Error::GuestMemory)
+    }
+
+    /// Set the queue to "ready", and update desc_table, avail_ring and
+    /// used_ring addresses based on the AccessPlatform handler.
+    fn enable(&mut self, set: bool) {
+        self.ready = set;
+
+        if set {
+            // Translate address of descriptor table and vrings.
+            if let Some(access_platform) = &self.access_platform {
+                self.desc_table =
+                    GuestAddress(access_platform.translate(self.desc_table.0, 0).unwrap());
+                self.avail_ring =
+                    GuestAddress(access_platform.translate(self.avail_ring.0, 0).unwrap());
+                self.used_ring =
+                    GuestAddress(access_platform.translate(self.used_ring.0, 0).unwrap());
+            }
+        } else {
+            self.desc_table = GuestAddress(0);
+            self.avail_ring = GuestAddress(0);
+            self.used_ring = GuestAddress(0);
+        }
     }
 }
 
@@ -824,6 +855,14 @@ impl<M: GuestAddressSpace> QueueStateT<M> for QueueState<M> {
             .map_err(Error::GuestMemory)
     }
 
+    fn used_idx(&self, mem: &M::T, order: Ordering) -> Result<Wrapping<u16>, Error> {
+        let addr = self.used_ring.unchecked_add(2);
+
+        mem.load(addr, order)
+            .map(Wrapping)
+            .map_err(Error::GuestMemory)
+    }
+
     fn add_used(&mut self, mem: &M::T, head_index: u16, len: u32) -> Result<(), Error> {
         if head_index >= self.actual_size() {
             error!(
@@ -917,8 +956,16 @@ impl<M: GuestAddressSpace> QueueStateT<M> for QueueState<M> {
         self.next_avail.0
     }
 
+    fn next_used(&self) -> u16 {
+        self.next_used.0
+    }
+
     fn set_next_avail(&mut self, next_avail: u16) {
         self.next_avail = Wrapping(next_avail);
+    }
+
+    fn set_next_used(&mut self, next_used: u16) {
+        self.next_used = Wrapping(next_used);
     }
 }
 
@@ -988,6 +1035,10 @@ impl<M: GuestAddressSpace> QueueStateT<M> for QueueStateSync<M> {
         self.state.lock().unwrap().avail_idx(mem, order)
     }
 
+    fn used_idx(&self, mem: &M::T, order: Ordering) -> Result<Wrapping<u16>, Error> {
+        self.state.lock().unwrap().used_idx(mem, order)
+    }
+
     fn add_used(&mut self, mem: &M::T, head_index: u16, len: u32) -> Result<(), Error> {
         self.state.lock().unwrap().add_used(mem, head_index, len)
     }
@@ -1008,8 +1059,16 @@ impl<M: GuestAddressSpace> QueueStateT<M> for QueueStateSync<M> {
         self.state.lock().unwrap().next_avail()
     }
 
+    fn next_used(&self) -> u16 {
+        self.state.lock().unwrap().next_used()
+    }
+
     fn set_next_avail(&mut self, next_avail: u16) {
         self.state.lock().unwrap().set_next_avail(next_avail);
+    }
+
+    fn set_next_used(&mut self, next_used: u16) {
+        self.state.lock().unwrap().set_next_used(next_used);
     }
 }
 
@@ -1113,6 +1172,11 @@ impl<M: GuestAddressSpace, S: QueueStateT<M>> Queue<M, S> {
         self.state.avail_idx(&self.mem.memory(), order)
     }
 
+    /// Reads the `idx` field from the used ring.
+    pub fn used_idx(&self, order: Ordering) -> Result<Wrapping<u16>, Error> {
+        self.state.used_idx(&self.mem.memory(), order)
+    }
+
     /// Put a used descriptor head into the used ring.
     pub fn add_used(&mut self, head_index: u16, len: u32) -> Result<(), Error> {
         self.state.add_used(&self.mem.memory(), head_index, len)
@@ -1147,9 +1211,19 @@ impl<M: GuestAddressSpace, S: QueueStateT<M>> Queue<M, S> {
         self.state.next_avail()
     }
 
-    /// Set the index for the next descriptor in the available ring.
+    /// Returns the index for the next descriptor in the used ring.
+    pub fn next_used(&self) -> u16 {
+        self.state.next_used()
+    }
+
+    /// Sets the index for the next descriptor in the available ring.
     pub fn set_next_avail(&mut self, next_avail: u16) {
         self.state.set_next_avail(next_avail);
+    }
+
+    /// Sets the index for the next descriptor in the used ring.
+    pub fn set_next_used(&mut self, next_used: u16) {
+        self.state.set_next_used(next_used);
     }
 }
 
@@ -1157,6 +1231,12 @@ impl<M: GuestAddressSpace> Queue<M, QueueState<M>> {
     /// A consuming iterator over all available descriptor chain heads offered by the driver.
     pub fn iter(&mut self) -> Result<AvailIter<'_, M>, Error> {
         self.state.iter(self.mem.memory())
+    }
+
+    /// Set the queue to "ready", and update desc_table, avail_ring and
+    /// used_ring addresses based on the AccessPlatform handler.
+    pub fn enable(&mut self, set: bool) {
+        self.state.enable(set)
     }
 }
 
